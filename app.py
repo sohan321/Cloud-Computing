@@ -8,8 +8,8 @@ import pandas as pd
 
 # === Config ===
 yf.set_tz_cache_location("custom/cache/location")
-POLL_CYCLE_SEC = int(os.getenv("POLL_CYCLE_SEC", "20"))  # full-universe refresh target time (10–20 typical)
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))          # tickers per yfinance call
+POLL_CYCLE_SEC = int(os.getenv("POLL_CYCLE_SEC", "120"))  # full-universe refresh target time
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))           # tickers per yfinance call
 DATA_DELAY_NOTE = os.getenv("DATA_DELAY_NOTE", "Data may be delayed by provider.")
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -23,7 +23,7 @@ latest: Dict[str, dict] = {}               # symbol -> {symbol, price, ts}
 subscribers: Set[threading.Event] = set()  # SSE nudges
 lock = threading.Lock()
 
-# === Batch plan (refresh all symbols within POLL_CYCLE_SEC) ===
+# === Batch plan ===
 def chunk(lst: List[str], n: int):
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
@@ -32,7 +32,7 @@ BATCHES = list(chunk(UNIVERSE, BATCH_SIZE))
 NUM_BATCHES = max(1, math.ceil(len(UNIVERSE) / BATCH_SIZE))
 BATCH_INTERVAL = max(1.0, POLL_CYCLE_SEC / NUM_BATCHES)
 
-# === Data fetching ===
+# === Data fetch ===
 def fetch_batch(symbols: List[str]) -> List[dict]:
     if not symbols:
         return []
@@ -51,18 +51,21 @@ def fetch_batch(symbols: List[str]) -> List[dict]:
             close = float(pd.DataFrame(df[s]["Close"]).dropna().iloc[-1, 0])
             ticks.append({"symbol": s, "price": close, "ts": now_ms})
         except Exception:
-            # sometimes a symbol is missing—skip; it will update next cycle
             pass
     return ticks
 
-# === Poller thread ===
+# === Viewer-driven poller ===
+active_viewers = 0
+poller_thread = None
+stop_flag = threading.Event()
+
 def poller():
     idx = 0
-    backoff = 0.0              # extra sleep if vendor throttles
-    BASE = BATCH_INTERVAL      # planned per-batch interval
-    MAX_BACKOFF = 60.0         # cap extra delay to 60s
+    backoff = 0.0
+    BASE = BATCH_INTERVAL
+    MAX_BACKOFF = 60.0
 
-    while True:
+    while not stop_flag.is_set():
         syms = BATCHES[idx]
         try:
             ticks = fetch_batch(syms)
@@ -76,25 +79,27 @@ def poller():
             if changed:
                 for ev in list(subscribers):
                     ev.set()
-            # success: decay backoff
             backoff = max(0.0, backoff * 0.5)
         except Exception:
-            # throttle/backoff on errors; keep last values
             backoff = min(MAX_BACKOFF, max(5.0, backoff * 1.7))
 
-        # sleep planned interval + backoff + small jitter
         time.sleep(BASE + backoff + random.uniform(0, 0.5))
         idx = (idx + 1) % NUM_BATCHES
 
-@app.on_event("startup")
-def start():
-    threading.Thread(target=poller, daemon=True).start()
+def ensure_poller_running():
+    global poller_thread
+    if poller_thread is None or not poller_thread.is_alive():
+        stop_flag.clear()
+        poller_thread = threading.Thread(target=poller, daemon=True)
+        poller_thread.start()
+
+def maybe_stop_poller():
+    if active_viewers == 0:
+        stop_flag.set()
 
 # === API Endpoints ===
-
 @app.get("/healthz")
 def healthz():
-    """Simple health and status check."""
     with lock:
         return {
             "status": "ok",
@@ -104,11 +109,11 @@ def healthz():
             "batches": NUM_BATCHES,
             "batch_interval_sec": BATCH_INTERVAL,
             "note": DATA_DELAY_NOTE,
+            "active_viewers": active_viewers,
         }
 
 @app.get("/api/snapshot")
 def snapshot(q: str = ""):
-    """Returns current cached prices for the requested tickers."""
     want = [w.strip().upper() for w in q.split(",") if w.strip()] or UNIVERSE
     with lock:
         data = [latest[s] for s in want if s in latest]
@@ -116,7 +121,10 @@ def snapshot(q: str = ""):
 
 @app.get("/sse")
 def sse(q: str = ""):
-    """Server-Sent Events stream for live updates."""
+    global active_viewers
+    active_viewers += 1
+    ensure_poller_running()
+
     want = [w.strip().upper() for w in q.split(",") if w.strip()] or UNIVERSE
     stop = threading.Event()
     subscribers.add(stop)
@@ -134,6 +142,9 @@ def sse(q: str = ""):
                 stop.clear()
         finally:
             subscribers.discard(stop)
+            global active_viewers
+            active_viewers = max(0, active_viewers - 1)
+            maybe_stop_poller()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -142,5 +153,4 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
 def root():
-    """Serves the dashboard UI."""
     return FileResponse("static/index.html")
