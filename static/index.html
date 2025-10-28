@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<meta charset="utf-8" />
+<title>Live S&P 500 (Delayed)</title>
+<style>
+  body {
+    font-family: ui-sans-serif, system-ui, Arial;
+    margin: 16px;
+  }
+  .meta {
+    margin: 6px 0 12px;
+    color: #666;
+  }
+  input,
+  select,
+  button {
+    padding: 6px 8px;
+    margin-right: 6px;
+  }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+  }
+  th,
+  td {
+    padding: 8px;
+    border-bottom: 1px solid #eee;
+    text-align: left;
+  }
+  th {
+    cursor: pointer;
+  }
+</style>
+
+<h1>
+  Live S&P 500 Watchboard
+  <small style="font-size: 0.6em; color: #888">(provider-delayed)</small>
+</h1>
+<div class="meta" id="note">connecting…</div>
+
+<div class="controls">
+  <input id="filter" placeholder="Filter symbols (e.g., NVDA,AAPL,MSFT)" />
+  <select id="pageSize">
+    <option>25</option>
+    <option selected>50</option>
+    <option>100</option>
+    <option>200</option>
+    <option>500</option>
+  </select>
+  <button id="apply">Apply</button>
+</div>
+
+<table id="tbl">
+  <thead>
+    <tr>
+      <th data-k="symbol">Symbol</th>
+      <th data-k="price">Price</th>
+      <th data-k="ts">Updated</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<script>
+  let rows = new Map();
+  let sortKey = "symbol",
+    sortAsc = true;
+  let es;
+
+  function fmtTime(ms) {
+    return new Date(ms).toLocaleTimeString();
+  }
+  function render(limit = 50) {
+    const tbody = document.querySelector("#tbl tbody");
+    const arr = Array.from(rows.values());
+    arr.sort((a, b) => {
+      if (sortKey === "price") return (sortAsc ? 1 : -1) * (a.price - b.price);
+      if (sortKey === "ts") return (sortAsc ? 1 : -1) * (a.ts - b.ts);
+      return (sortAsc ? 1 : -1) * a.symbol.localeCompare(b.symbol);
+    });
+    tbody.innerHTML = "";
+    for (const r of arr.slice(0, limit)) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${r.symbol}</td><td>${r.price.toFixed(
+        2
+      )}</td><td>${fmtTime(r.ts)}</td>`;
+      tbody.appendChild(tr);
+    }
+  }
+  function applyRender() {
+    render(parseInt(document.getElementById("pageSize").value, 10) || 50);
+  }
+
+  function connect(listCsv = "") {
+    if (es) es.close();
+    rows.clear();
+    es = new EventSource(
+      `/sse${listCsv ? "?q=" + encodeURIComponent(listCsv) : ""}`
+    );
+    es.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.note)
+        document.getElementById("note").textContent =
+          msg.note + " • Live UI (polled)";
+      for (const t of msg.data || []) rows.set(t.symbol, t);
+      applyRender();
+    };
+    es.onerror = () => {
+      document.getElementById("note").textContent = "Disconnected (retrying)…";
+    };
+  }
+  document.querySelectorAll("th").forEach((th) => {
+    th.onclick = () => {
+      const k = th.dataset.k;
+      if (sortKey === k) sortAsc = !sortAsc;
+      else {
+        sortKey = k;
+        sortAsc = true;
+      }
+      applyRender();
+    };
+  });
+  document.getElementById("apply").onclick = () => {
+    const f = document.getElementById("filter").value.trim().toUpperCase();
+    connect(f);
+  };
+  connect(""); // default subscribe to all (UI just pages)
+</script>
