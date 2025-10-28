@@ -51,6 +51,7 @@ def fetch_batch(symbols: List[str]) -> List[dict]:
             close = float(pd.DataFrame(df[s]["Close"]).dropna().iloc[-1, 0])
             ticks.append({"symbol": s, "price": close, "ts": now_ms})
         except Exception:
+            # symbol missing or no data in this interval; skip
             pass
     return ticks
 
@@ -64,23 +65,37 @@ def poller():
     backoff = 0.0
     BASE = BATCH_INTERVAL
     MAX_BACKOFF = 60.0
+    last_push_ms = 0  # heartbeat timer
 
     while not stop_flag.is_set():
         syms = BATCHES[idx]
         try:
             ticks = fetch_batch(syms)
             changed = False
+            now_ms = int(time.time() * 1000)
+
             with lock:
                 for t in ticks:
                     prev = latest.get(t["symbol"])
-                    if (not prev) or (prev["price"] != t["price"]):
-                        latest[t["symbol"]] = t
+                    # check if price changed (rounded to 2 decimal places)
+                    price_changed = (not prev) or (round(prev["price"], 2) != round(t["price"], 2))
+
+                    # always refresh cache so timestamp stays current
+                    latest[t["symbol"]] = t
+                    if price_changed:
                         changed = True
-            if changed:
+
+            # heartbeat: push at least once every 30 s even if nothing changed
+            heartbeat = (now_ms - last_push_ms) > 30_000
+
+            if changed or heartbeat:
                 for ev in list(subscribers):
                     ev.set()
+                last_push_ms = now_ms
+
             backoff = max(0.0, backoff * 0.5)
         except Exception:
+            # exponential backoff on vendor/rate-limit errors
             backoff = min(MAX_BACKOFF, max(5.0, backoff * 1.7))
 
         time.sleep(BASE + backoff + random.uniform(0, 0.5))
@@ -97,7 +112,11 @@ def maybe_stop_poller():
     if active_viewers == 0:
         stop_flag.set()
 
-# === API Endpoints ===
+# === API Endpoints (put BEFORE static mount) ===
+@app.get("/ping")
+def ping():
+    return "pong"
+
 @app.get("/healthz")
 def healthz():
     with lock:
@@ -111,6 +130,24 @@ def healthz():
             "note": DATA_DELAY_NOTE,
             "active_viewers": active_viewers,
         }
+    
+@app.get("/status")
+def status():
+    with lock:
+        return {
+            "status": "ok",
+            "symbols": len(latest),
+            "cycle_sec": POLL_CYCLE_SEC,
+            "batch_size": BATCH_SIZE,
+            "batches": NUM_BATCHES,
+            "batch_interval_sec": BATCH_INTERVAL,
+            "note": DATA_DELAY_NOTE,
+            "active_viewers": active_viewers,
+        }
+
+@app.get("/hz")
+def hz():
+    return status()
 
 @app.get("/api/snapshot")
 def snapshot(q: str = ""):
@@ -154,3 +191,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 @app.get("/")
 def root():
     return FileResponse("static/index.html")
+
+@app.get("/routes")
+def routes():
+    return [r.path for r in app.routes]
