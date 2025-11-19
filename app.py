@@ -113,9 +113,6 @@ def fetch_batch(symbols: List[str]) -> List[dict]:
 
 # === BigQuery write ===
 def write_batch_bq(ticks: List[dict]):
-    """
-    ticks: [{"symbol": "AAPL", "price": 194.23, "ts": 1712345678901}, ...]
-    """
     if not ticks:
         return
 
@@ -123,7 +120,7 @@ def write_batch_bq(ticks: List[dict]):
     for t in ticks:
         rows.append(
             {
-                "ts": pd.to_datetime(t["ts"], unit="ms").to_pydatetime(),
+                "ts": pd.to_datetime(t["ts"], unit="ms").isoformat(),  # FIXED
                 "symbol": t["symbol"],
                 "price": float(t["price"]),
             }
@@ -135,7 +132,6 @@ def write_batch_bq(ticks: List[dict]):
         print("BQ insert errors:", errors)
     else:
         print(f"BQ inserted {len(rows)} rows into {BQ_TABLE_FQN}")
-
 
 # === Viewer-driven poller ===
 active_viewers = 0
@@ -342,3 +338,4 @@ def root():
 @app.get("/routes")
 def routes():
     return [r.path for r in app.routes]
+
