@@ -5,6 +5,8 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import yfinance as yf
 import pandas as pd
+from google.cloud import bigquery
+from datetime import datetime
 
 # === Config ===
 yf.set_tz_cache_location("custom/cache/location")
@@ -12,6 +14,22 @@ POLL_CYCLE_SEC = int(os.getenv("POLL_CYCLE_SEC", "120"))  # full-universe refres
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))           # tickers per yfinance call
 DATA_DELAY_NOTE = os.getenv("DATA_DELAY_NOTE", "Data may be delayed by provider.")
 PORT = int(os.getenv("PORT", "8080"))
+
+# === BigQuery Config ===
+PROJECT_ID = os.getenv("PROJECT_ID", "cloud-project-476018")
+DATASET_ID = os.getenv("DATASET_ID", "stocks_dataset")
+TABLE_ID = os.getenv("TABLE_ID", "stock_prices")
+ENABLE_BIGQUERY = os.getenv("ENABLE_BIGQUERY", "false").lower() == "true"
+
+# Initialize BigQuery client if enabled
+bq_client = None
+if ENABLE_BIGQUERY:
+    try:
+        bq_client = bigquery.Client(project=PROJECT_ID)
+        print(f"BigQuery client initialized: {PROJECT_ID}.{DATASET_ID}.{TABLE_ID}")
+    except Exception as e:
+        print(f"BigQuery initialization failed: {e}")
+        ENABLE_BIGQUERY = False
 
 # === Universe ===
 with open("sp500.txt", "r", encoding="utf-8") as f:
@@ -31,6 +49,32 @@ def chunk(lst: List[str], n: int):
 BATCHES = list(chunk(UNIVERSE, BATCH_SIZE))
 NUM_BATCHES = max(1, math.ceil(len(UNIVERSE) / BATCH_SIZE))
 BATCH_INTERVAL = max(1.0, POLL_CYCLE_SEC / NUM_BATCHES)
+
+# === BigQuery Storage ===
+def store_to_bigquery(ticks: List[dict]):
+    """Store price data to BigQuery"""
+    if not ENABLE_BIGQUERY or not bq_client or not ticks:
+        return
+
+    try:
+        # Convert to BigQuery format
+        rows = []
+        for t in ticks:
+            rows.append({
+                "symbol": t["symbol"],
+                "price": float(t["price"]),
+                "timestamp": datetime.fromtimestamp(t["ts"] / 1000).isoformat()
+            })
+
+        table_ref = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
+        errors = bq_client.insert_rows_json(table_ref, rows)
+
+        if errors:
+            print(f"BigQuery insert errors: {errors}")
+        else:
+            print(f"Inserted {len(rows)} rows to BigQuery")
+    except Exception as e:
+        print(f"BigQuery storage error: {e}")
 
 # === Data fetch ===
 def fetch_batch(symbols: List[str]) -> List[dict]:
@@ -53,6 +97,11 @@ def fetch_batch(symbols: List[str]) -> List[dict]:
         except Exception:
             # symbol missing or no data in this interval; skip
             pass
+
+    # Store to BigQuery if enabled
+    if ticks:
+        store_to_bigquery(ticks)
+
     return ticks
 
 # === Viewer-driven poller ===
@@ -129,7 +178,41 @@ def healthz():
             "batch_interval_sec": BATCH_INTERVAL,
             "note": DATA_DELAY_NOTE,
             "active_viewers": active_viewers,
+            "bigquery_enabled": ENABLE_BIGQUERY,
         }
+
+@app.post("/api/store-current")
+def store_current():
+    """Manually store current in-memory data to BigQuery"""
+    if not ENABLE_BIGQUERY:
+        return JSONResponse({"error": "BigQuery not enabled. Set ENABLE_BIGQUERY=true"}, status_code=400)
+
+    with lock:
+        ticks = list(latest.values())
+
+    if not ticks:
+        return JSONResponse({"error": "No data available to store"}, status_code=400)
+
+    store_to_bigquery(ticks)
+    return {"status": "success", "stored": len(ticks)}
+
+@app.get("/api/collect")
+def collect_and_store():
+    """Fetch fresh data and store to BigQuery (for Cloud Scheduler)"""
+    if not ENABLE_BIGQUERY:
+        return JSONResponse({"error": "BigQuery not enabled"}, status_code=400)
+
+    # Rotate through all stocks - pick random batch each time
+    import random
+    batch_to_fetch = random.sample(UNIVERSE, min(50, len(UNIVERSE)))
+    ticks = fetch_batch(batch_to_fetch)
+
+    return {
+        "status": "success",
+        "fetched": len(ticks),
+        "symbols_sampled": len(batch_to_fetch),
+        "stored_to_bigquery": ENABLE_BIGQUERY
+    }
     
 @app.get("/status")
 def status():
