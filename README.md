@@ -4,9 +4,9 @@ python -m venv .venv
 
 pip install -r requirements.txt
 
-set POLL_CYCLE_SEC=20 (2 seconds)
+set POLL_CYCLE_SEC=120 (120 seconds)
 
-set BATCH_SIZE=50 (500/50 means 10 calls 2 seconds apart)
+set BATCH_SIZE=20 (500/20 means 25 calls 5 seconds apart)
 
 set DATA_DELAY_NOTE=20 delay 20 seconds after all calls
 
