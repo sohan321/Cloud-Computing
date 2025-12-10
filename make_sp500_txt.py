@@ -8,7 +8,7 @@ OUT_ALL = "sp500_all_shares.txt"   # includes companies with multiple share clas
 OUT_PRIMARY = "sp500.txt"          # one symbol per company (deduped by company name)
 OUT_CSV = "sp500_constituents.csv" # optional CSV with symbol,name,sector
 
-# A few realistic user agents. We'll rotate to be polite.
+
 UAS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
